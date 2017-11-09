@@ -4,6 +4,8 @@ This is a modified version of the original [Gala Alternate Alt-Tab Plugin](https
 
 Instead of showing icons, this version shows a window overview like preview of the current workspace.
 
+![screenshot](Screenshot.png)
+
 Please be aware of that it's Currently a prototype and won't work properly in all cases.
 
 ## Installing & building
