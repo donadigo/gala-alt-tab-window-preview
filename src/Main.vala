@@ -65,10 +65,10 @@ namespace Gala.Plugins.AlternateAltTab
 
 			window_actor.notify["allocate"].connect (update_clone);
 
+			update_clone ();
+
 			var window_icon = new WindowIcon (window, 64);
 			window_icon.set_position (container.width / 2 - window_icon.width / 2, container.height - window_icon.height / 2);
-
-			update_clone ();
 
 			add (window_icon);
 		}
