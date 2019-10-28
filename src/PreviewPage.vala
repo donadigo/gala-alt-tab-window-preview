@@ -1,3 +1,21 @@
+/*-
+ * Copyright (c) 2019 Adam Bieńkowski
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 2.1 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ *
+ * Authored by: Adam Bieńkowski <donadigos159@gmail.com>
+ */
 
 using Meta;
 using Gala;
@@ -7,14 +25,13 @@ namespace Gala.Plugins.AlternateAltTab
 {
     public class PreviewPage : Clutter.Actor
     { 
-		const int SPACING = 12;
-		const int PADDING = 24;
-		const int MIN_OFFSET = 32;
+        const int MIN_OFFSET = 64;
+		const int SPACING = 18;
+        const float MIN_CLONE_SCALE = 0.14f;
+        const float MAX_CLONE_SCALE = 0.5f;
 
         public Screen screen { get; construct; }
-
         public WindowActorClone? current { get; set; }
-
         public Clutter.Actor container;
 
         public PreviewPage (Screen screen) {
@@ -24,19 +41,38 @@ namespace Gala.Plugins.AlternateAltTab
         construct {
             var monitor = screen.get_current_monitor ();
             var geom = screen.get_monitor_geometry (monitor);
-            width = geom.width - MIN_OFFSET * 2;
-            height = geom.height - MIN_OFFSET * 2;
-            x = MIN_OFFSET;
-            y = MIN_OFFSET;
+            set_position (MIN_OFFSET, MIN_OFFSET);
+            set_size (geom.width - MIN_OFFSET * 2, geom.height - MIN_OFFSET * 2);
 
             container = new Clutter.Actor ();
             container.set_size (width, -1);
+            //  container.set_easing_duration (300);
+            //  container.set_easing_mode (Clutter.AnimationMode.EASE_IN_OUT_QUAD);
+
             add_child (container);
         }
 
-        public bool add_window_actor (WindowActorClone window_actor) {
-            container.add_child (window_actor);
+        public bool add_window_actor (WindowActorClone window_actor, int index = -1) {
+            window_actor.queue_reallocate.connect (queue_reallocate);
+            container.insert_child_at_index (window_actor, index);
             return true;
+        }
+
+        public bool remove_window (Window window) {
+            foreach (unowned Clutter.Actor child in container.get_children ()) {
+                unowned WindowActorClone? clone = child as WindowActorClone;
+                if (clone != null && clone.window == window) {
+                    if (clone == current) {
+                        current = (WindowActorClone?)(clone.get_next_sibling () ?? clone.get_previous_sibling ());
+                    }
+
+                    clone.queue_reallocate.disconnect (queue_reallocate);
+                    container.remove_child (clone);
+                    break;
+                }
+            }
+
+            return current != null;
         }
 
         public bool next (bool backward) {
@@ -56,21 +92,28 @@ namespace Gala.Plugins.AlternateAltTab
             return current != null;
         }
 
-        public void reallocate ()
+        public void reallocate (bool animate = true)
         {
             var children = container.get_children ();
-            uint child_count = children.length ();
 
             float current_height = 0;
             float current_width = 0;
 
             float max_width = width;
 
-            var row_children = new Gee.ArrayList<Clutter.Actor> ();
+            var row_children = new Gee.ArrayList<WindowActorClone> ();
 
-            for (int i = 0; i < child_count; i++) {
-                var child = children.nth_data (i);
-                if (child.width > max_width - current_width) {
+            float sscale = calculate_preferred_clone_scale ();
+
+            foreach (unowned Actor child in children) {
+                unowned WindowActorClone? clone = child as WindowActorClone;
+                if (clone == null) {
+                    continue;
+                }
+                
+                clone.compute_final_size_for_scale (sscale);
+
+                if (clone.final_width > max_width - current_width) {
                     float max_row_height = allocate_align_row (row_children, max_width, current_height);
 
                     current_height += max_row_height + SPACING;
@@ -78,27 +121,45 @@ namespace Gala.Plugins.AlternateAltTab
                     current_width = 0;
                 }
 
-                current_width += child.width;
+                current_width += clone.final_width;
                 if (row_children.size > 0) {
                     current_width += SPACING;
                 }
 
-                row_children.add (child);
+                row_children.add (clone);
             }
 
             if (row_children.size > 0) {
-                allocate_align_row (row_children, max_width, current_height);
+                current_height += allocate_align_row (row_children, max_width, current_height);
             }
 
-            container.x = width / 2 - container.width / 2;
-            container.y = height / 2 - container.height / 2;
+            foreach (unowned Actor child in children) {
+                unowned WindowActorClone? clone = child as WindowActorClone;
+                if (clone == null) {
+                    continue;
+                }
+
+                clone.update_scale (sscale, animate);
+            }
+
+            container.set_position (width / 2 - container.width / 2, height / 2 - container.height / 2);
         }
 
-        private float allocate_align_row (Gee.ArrayList<Clutter.Actor> actors, float max_width, float y)
+        void queue_reallocate ()
+        {
+            Idle.add (() => {
+                reallocate ();
+                return false; 
+            });
+        }
+
+        float allocate_align_row (Gee.ArrayList<WindowActorClone> actors, float max_width, float y)
         {
             float real_width = 0;
+            float max_height = 0;
             foreach (var actor in actors) {
-                real_width += actor.width;
+                real_width += actor.final_width;
+                max_height = float.max (max_height, actor.final_height);
             }
 
             int spacing;
@@ -109,8 +170,6 @@ namespace Gala.Plugins.AlternateAltTab
             }
 
             real_width += spacing;
-
-            float max_height = 0;
 
             float row_offset = (max_width - real_width) / 2;
             float actor_offset = 0;
@@ -123,13 +182,33 @@ namespace Gala.Plugins.AlternateAltTab
                     actor_spacing = 0;
                 }
 
-                actor.x = row_offset + actor_offset + actor_spacing;
-                actor.y = y;
-                actor_offset += actor.width + actor_spacing;
-                max_height = float.max (max_height, actor.height);
+                actor.set_position (
+                    (row_offset + actor_offset + actor_spacing),
+                    (y + (max_height / 2 - actor.final_height / 2))
+                );
+
+                actor_offset += actor.final_width + actor_spacing;
             }
 
             return max_height;
+        }
+
+        float calculate_preferred_clone_scale ()
+        {
+            float available_area = width * height;
+            float sum_window_area = 0.0f;
+
+            foreach (unowned Actor child in container.get_children ()) {
+                unowned WindowActorClone? clone = child as WindowActorClone;
+                if (clone == null) {
+                    continue;
+                }
+
+                var frame_rect = clone.window.get_frame_rect ();
+                sum_window_area += frame_rect.width * frame_rect.height;
+            }
+
+            return (available_area / sum_window_area).clamp (MIN_CLONE_SCALE, MAX_CLONE_SCALE);
         }
     }
 }

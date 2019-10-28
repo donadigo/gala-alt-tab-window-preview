@@ -24,6 +24,8 @@ vala_precompile(VALA_C
 	src/Main.vala
 	src/PreviewPage.vala
 	src/PreviewRow.vala
+	src/WindowActorClone.vala
+	src/Constraints.vala
 PACKAGES
 	gala
 	granite

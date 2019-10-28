@@ -45,51 +45,8 @@ namespace Gala.Plugins.AlternateAltTab
 		}
 	}
 
-	public class WindowActorClone : Clutter.Actor {
-		public Meta.WindowActor window_actor { get; construct; }
-		public Meta.Window window { get; construct; }
-
-		public Clutter.Actor container { get; private set; }
-
-		private Clutter.Clone clone;
-
-		public WindowActorClone (Meta.WindowActor window_actor) {
-			Object (window_actor: window_actor, window: window_actor.get_meta_window ());
-
-			clone = new Clutter.Clone (window_actor.get_texture ());
-
-			container = new Clutter.Actor ();
-			container.add (clone);
-			container.set_scale (0.3f, 0.3f);
-			add (container);
-
-			window_actor.notify["allocate"].connect (update_clone);
-
-			update_clone ();
-
-			var window_icon = new WindowIcon (window, 64);
-			window_icon.set_position (container.width / 2 - window_icon.width / 2, container.height - window_icon.height / 2);
-
-			add (window_icon);
-		}
-
-		private void update_clone ()
-		{
-			var rect = window_actor.get_meta_window ().get_frame_rect ();
-			container.width = (float)(rect.width * container.scale_x);
-			container.height = (float)(rect.height * container.scale_y);
-
-			float x_offset = rect.x - window_actor.x;
-			float y_offset = rect.y - window_actor.y;
-			clone.set_position (-x_offset, -y_offset);
-		}
-	}
-
 	public class Main : Gala.Plugin
 	{
-		const int SPACING = 12;
-		const int PADDING = 24;
-		const int MIN_OFFSET = 32;
 		const int INDICATOR_BORDER = 6;
 		const double ANIMATE_SCALE = 0.8;
 
@@ -111,6 +68,7 @@ namespace Gala.Plugins.AlternateAltTab
 		}
 
 		PreviewPage? current_page = null;
+		unowned Workspace? current_workspace = null;
 
 		public override void initialize (Gala.WindowManager wm)
 		{
@@ -123,12 +81,8 @@ namespace Gala.Plugins.AlternateAltTab
 			KeyBinding.set_custom_handler ("switch-windows", handle_switch_windows);
 			KeyBinding.set_custom_handler ("switch-windows-backward", handle_switch_windows);
 
-			var layout = new FlowLayout (FlowOrientation.HORIZONTAL);
-			layout.snap_to_grid = false;
-			layout.column_spacing = layout.row_spacing = SPACING;
-
 			wrapper = new Actor ();
-			wrapper.background_color = { 0, 0, 0, 155 };
+			wrapper.background_color = { 0, 0, 0, 190 };
 			wrapper.reactive = true;
 			wrapper.set_pivot_point (0.5f, 0.5f);
 			wrapper.key_release_event.connect (key_relase_event);
@@ -137,7 +91,6 @@ namespace Gala.Plugins.AlternateAltTab
 			indicator.background_color = { 255, 255, 255, 180 };
 			indicator.width = INDICATOR_BORDER * 2;
 			indicator.height = INDICATOR_BORDER * 2;
-			indicator.set_easing_duration (100);
 
 			wrapper.add_child (indicator);
 		}
@@ -153,6 +106,8 @@ namespace Gala.Plugins.AlternateAltTab
 		{
 			var settings = Settings.get_default ();
 			var workspace = settings.all_workspaces ? null : screen.get_active_workspace ();
+
+			current_workspace = workspace;
 
 			// copied from gnome-shell, finds the primary modifier in the mask
 			var mask = binding.get_mask ();
@@ -176,12 +131,18 @@ namespace Gala.Plugins.AlternateAltTab
 			var binding_name = binding.get_name ();
 			var backward = binding_name.has_suffix ("-backward");
 
+			//  bool s = (ModifierType.SHIFT_MASK in get_current_modifiers ());
+			//  if (Meta.VirtualModifier.SHIFT_MASK in binding.get_modifiers ()) {
+			//  	print ("BACKWARD".to_string () + "\n");
+			//  }
+
 			// FIXME for unknown reasons, switch-applications-backward won't be emitted, so we
 			//       test manually if shift is held down
-			backward = binding_name == "switch-applications"
+			backward = binding_name == "switch-windows"
 				&& (get_current_modifiers () & ModifierType.SHIFT_MASK) != 0;
 
-			next_window (display, workspace, backward);
+				//  print (backward.to_string () + "\n");
+				next_window (display, workspace, backward);
 		}
 
 		void collect_windows (Display display, Workspace? workspace)
@@ -196,15 +157,65 @@ namespace Gala.Plugins.AlternateAltTab
 			foreach (var window in windows) {
 				var actor = get_actor_for_window (window);
 				var clone = new WindowActorClone (actor);
+				clone.activate.connect (on_clone_activated);
+
 				page.add_window_actor (clone);
 				if (window == current_window) {
 					page.current = clone;
 				}
 			}
 
-			page.reallocate ();
-
+			page.reallocate (false);
 			pages.add (page);
+		}
+
+		void on_window_added (Window window)
+		{
+			if (current_page == null) {
+				return;
+			}
+
+			Idle.add (() => {
+				unowned Display display = window.get_display ();
+				int index = display.get_tab_list (TabList.NORMAL, window.get_workspace ()).index (window);
+				if (index != -1) {
+					var actor = (Meta.WindowActor)window.get_compositor_private ();
+					var clone = new WindowActorClone (actor);
+					clone.activate.connect (on_clone_activated);
+
+					current_page.add_window_actor (clone, index);
+					current_page.reallocate ();
+					update_indicator_position ();
+				}
+
+				return false;
+			});
+		}
+
+		void on_window_removed (Window window)
+		{
+			if (current_page == null) {
+				return;
+			}
+
+			if (current_page.remove_window (window)) {
+				current_page.reallocate ();
+				update_indicator_position ();
+			} else {
+				close_switcher (Gdk.CURRENT_TIME);
+			}
+		}
+
+		void on_clone_activated (WindowActorClone clone)
+		{
+			current_page.current = clone;
+			update_indicator_position ();
+			
+			// Wait 50ms to make the indicator visible for a bit
+			Timeout.add (50, () => {
+				close_switcher (Gdk.CURRENT_TIME);
+				return false;
+			});
 		}
 
 		Meta.WindowActor? get_actor_for_window (Meta.Window window)
@@ -223,6 +234,11 @@ namespace Gala.Plugins.AlternateAltTab
 
 		void open_switcher ()
 		{
+			if (current_workspace != null) {
+				current_workspace.window_added.connect (on_window_added);
+				current_workspace.window_removed.connect (on_window_removed);
+			}
+
 			if (pages.size == 0) {
 				return;
 			}
@@ -242,7 +258,7 @@ namespace Gala.Plugins.AlternateAltTab
 			var settings = Settings.get_default ();
 
 			if (settings.animate) {
-				wrapper.opacity = 0;
+				//  wrapper.opacity = 0;
 			}
 
 			int width, height;
@@ -252,10 +268,9 @@ namespace Gala.Plugins.AlternateAltTab
 
 			wm.ui_group.insert_child_above (wrapper, null);
 
-			wrapper.save_easing_state ();
-			wrapper.set_easing_duration (200);
+			//  wrapper.save_easing_state ();
 			wrapper.opacity = 255;
-			wrapper.restore_easing_state ();
+			//  wrapper.restore_easing_state ();
 
 			modal_proxy = wm.push_modal ();
 			modal_proxy.keybinding_filter = keybinding_filter;
@@ -276,13 +291,16 @@ namespace Gala.Plugins.AlternateAltTab
 			wm.pop_modal (modal_proxy);
 			opened = false;
 
+			if (current_workspace != null) {
+				current_workspace.window_added.disconnect (on_window_added);
+				current_workspace.window_removed.disconnect (on_window_removed);
+			}
+
 			ObjectCallback remove_actor = () => {
 				wm.ui_group.remove_child (wrapper);
 			};
 
 			if (Settings.get_default ().animate) {
-				wrapper.save_easing_state ();
-				wrapper.set_easing_duration (100);
 				wrapper.opacity = 0;
 
 				var transition = wrapper.get_transition ("opacity");
@@ -291,7 +309,6 @@ namespace Gala.Plugins.AlternateAltTab
 				else
 					remove_actor (this);
 
-				wrapper.restore_easing_state ();
 			} else {
 				remove_actor (this);
 			}
@@ -300,7 +317,11 @@ namespace Gala.Plugins.AlternateAltTab
 				return;
 			}
 
-			var window = current.window;
+			activate_window (current.window, time);
+		}
+
+		void activate_window (Meta.Window window, uint32 time)
+		{
 			var workspace = window.get_workspace ();
 			if (workspace != wm.get_screen ().get_active_workspace ())
 				workspace.activate_with_focus (window, time);
@@ -316,13 +337,7 @@ namespace Gala.Plugins.AlternateAltTab
 
 		void update_indicator_position ()
 		{
-			float x, y;
-			current.get_position (out x, out y);
-
-			indicator.x = current_page.container.x + MIN_OFFSET + x - INDICATOR_BORDER;
-			indicator.y = current_page.container.y + MIN_OFFSET + y - INDICATOR_BORDER;
-			indicator.width = current.container.width + INDICATOR_BORDER * 2;
-			indicator.height = current.container.height + INDICATOR_BORDER * 2;
+			current.attach_indicator (indicator);
 		}
 
 		bool key_relase_event (KeyEvent event)
@@ -341,11 +356,11 @@ namespace Gala.Plugins.AlternateAltTab
 			return false;
 		}
 
-		Gdk.ModifierType get_current_modifiers ()
+		static Gdk.ModifierType get_current_modifiers ()
 		{
 			Gdk.ModifierType modifiers;
 			double[] axes = {};
-			Gdk.Display.get_default ().get_device_manager ().get_client_pointer ()
+			Gdk.Display.get_default ().get_default_seat ().get_pointer ()
 				.get_state (Gdk.get_default_root_window (), axes, out modifiers);
 
 			return modifiers;
@@ -353,9 +368,14 @@ namespace Gala.Plugins.AlternateAltTab
 
 		bool keybinding_filter (KeyBinding binding)
 		{
-			// don't block any keybinding for the time being
-			// return true for any keybinding that should be handled here.
-			return false;
+			if (!binding.is_builtin ())
+			return true;
+
+			// otherwise we determine by name if it's meant for us
+			var name = binding.get_name ();
+
+			return !(name == "switch-applications" || name == "switch-applications-backward"
+				|| name == "switch-windows" || name == "switch-windows-backward");
 		}
 	}
 }
